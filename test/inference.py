@@ -104,7 +104,7 @@ def collect_logits(model, dataloader, device):
     all_logits = []
     for images, _ in dataloader:
         images = images.to(device, non_blocking=True)
-        with torch.amp.autocast('cuda'):
+        with autocast_for(device):
             out = model(images)
         all_logits.append(out.float())
     return torch.cat(all_logits, dim=0)
@@ -141,7 +141,7 @@ def collect_tta_logits_with_coarse(model, dataset, tta_transforms, device, batch
             fine_all, coarse_all = [], []
             for images, _ in make_loader(dataset, batch_size):
                 images = images.to(device, non_blocking=True)
-                with torch.amp.autocast('cuda'):
+                with autocast_for(device):
                     features = model.forward_features(images)
                     fine_logits = model.head(features)
                     coarse_logits = model.head_superclass(features)
@@ -203,7 +203,24 @@ MODEL_REGISTRY = {
 }
 
 
-def load_model(model_name, checkpoint_path, device, num_classes=100, num_superclasses=20):
+def resolve_state_dict(ckpt, prefer_ema=False):
+    """Resolve common checkpoint layouts to a model state_dict."""
+    if not isinstance(ckpt, dict):
+        return ckpt
+
+    if prefer_ema and isinstance(ckpt.get('model_ema'), dict):
+        return ckpt['model_ema']
+
+    for key in ('model_state_dict', 'state_dict', 'model'):
+        value = ckpt.get(key)
+        if isinstance(value, dict):
+            return value
+
+    return ckpt
+
+
+def load_model(model_name, checkpoint_path, device, num_classes=100,
+               num_superclasses=20, prefer_ema=False):
     """Load a model from checkpoint."""
     if model_name.startswith('wrn'):
         model = MODEL_REGISTRY[model_name](num_classes=num_classes)
@@ -213,17 +230,7 @@ def load_model(model_name, checkpoint_path, device, num_classes=100, num_supercl
 
     model = model.to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-    # Handle different checkpoint formats
-    if isinstance(ckpt, dict):
-        for key in ('model_state_dict', 'state_dict', 'model'):
-            if key in ckpt and isinstance(ckpt[key], dict):
-                state_dict = ckpt[key]
-                break
-        else:
-            state_dict = ckpt
-    else:
-        state_dict = ckpt
+    state_dict = resolve_state_dict(ckpt, prefer_ema=prefer_ema)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         print(f"  Warning: missing keys: {missing}")
@@ -231,7 +238,8 @@ def load_model(model_name, checkpoint_path, device, num_classes=100, num_supercl
         print(f"  Warning: unexpected keys: {unexpected}")
 
     epoch = ckpt.get('epoch', '?') if isinstance(ckpt, dict) else '?'
-    print(f"  Loaded {model_name} from {checkpoint_path} (epoch {epoch})")
+    ema_note = " using EMA weights" if prefer_ema and isinstance(ckpt, dict) and 'model_ema' in ckpt else ""
+    print(f"  Loaded {model_name} from {checkpoint_path} (epoch {epoch}){ema_note}")
     model.eval()
     return model
 
@@ -261,6 +269,8 @@ def main():
                         help='Hierarchical score fusion weight for DHVT aux head. '
                              '0=disabled. Recommended: 0.3 (balanced) ~ 1.0 (SC_Density focus). '
                              'score(c) = log p_fine(c) + beta * log p_coarse(sc(c))')
+    parser.add_argument('--use-model-ema', action='store_true',
+                        help='Load DHVT model_ema weights when present in the checkpoint')
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -310,7 +320,8 @@ def main():
         if use_fusion:
             print(f"  Hierarchical score fusion: beta={args.fusion_beta}")
         dhvt = load_model(args.dhvt_model, args.dhvt_checkpoint, device,
-                          num_superclasses=args.num_superclasses)
+                          num_superclasses=args.num_superclasses,
+                          prefer_ema=args.use_model_ema)
         dhvt_test_ds = datasets.CIFAR100(
             args.data_path, train=False, transform=dhvt_transform, download=True)
 
