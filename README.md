@@ -4,8 +4,10 @@
 ## Requirements
 - 본 프로젝트는 uv로 패키지를 관리합니다.
 ```bash
-# uv 설치(설치 후 쉘 재시작 필요)
+# uv 설치
 $ curl -LsSf https://astral.sh/uv/install.sh | sh
+# 경로 설정
+$ export PATH="$HOME/.local/bin:$PATH"
 # 의존성 설치
 $ uv sync 
 ```
