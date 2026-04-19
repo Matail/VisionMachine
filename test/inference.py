@@ -32,7 +32,7 @@ from torchvision import datasets, transforms
 from models.wideresnet import wrn_28_10
 from models.dhvt import dhvt_tiny_cifar_patch4, dhvt_small_cifar_patch4
 from datasets import (
-    IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD,
+    CIFAR100_MEAN, CIFAR100_STD,
     CIFAR100_FINE_TO_COARSE,
 )
 
@@ -41,11 +41,11 @@ from datasets import (
 # TTA transforms
 # ---------------------------------------------------------------------------
 
-def get_tta_transforms(input_size=32, padding=4):
+def get_tta_transforms(input_size=32, padding=4, include_flipped_corners=True):
     """Returns list of (name, transform) for test-time augmentation."""
     normalize = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
     ])
 
     tta_list = [
@@ -70,10 +70,14 @@ def get_tta_transforms(input_size=32, padding=4):
                 return transforms.functional.crop(padded, t, l, input_size, input_size)
             return crop_fn
 
-        tta_list.append((name, transforms.Compose([
-            transforms.Lambda(make_crop_fn(top, left)),
-            normalize,
-        ])))
+        crop = transforms.Lambda(make_crop_fn(top, left))
+        tta_list.append((name, transforms.Compose([crop, normalize])))
+        if include_flipped_corners:
+            tta_list.append((f"{name}_hflip", transforms.Compose([
+                crop,
+                transforms.RandomHorizontalFlip(p=1.0),
+                normalize,
+            ])))
 
     return tta_list
 
@@ -96,9 +100,10 @@ def collect_logits(model, dataloader, device):
 
 
 @torch.no_grad()
-def collect_tta_probs(model, data_path, device, input_size=32, batch_size=256):
+def collect_tta_probs(model, data_path, device, input_size=32, batch_size=256,
+                      include_flipped_corners=True):
     """Collect TTA logit-averaged probabilities for a single model."""
-    tta_transforms = get_tta_transforms(input_size)
+    tta_transforms = get_tta_transforms(input_size, include_flipped_corners=include_flipped_corners)
     all_logits = []
 
     for name, tfm in tta_transforms:
@@ -114,9 +119,10 @@ def collect_tta_probs(model, data_path, device, input_size=32, batch_size=256):
 
 
 @torch.no_grad()
-def collect_tta_logits_with_coarse(model, data_path, device, input_size=32, batch_size=256):
+def collect_tta_logits_with_coarse(model, data_path, device, input_size=32, batch_size=256,
+                                   include_flipped_corners=True):
     """Collect TTA-averaged fine and coarse logits from a DHVT model with aux head."""
-    tta_transforms = get_tta_transforms(input_size)
+    tta_transforms = get_tta_transforms(input_size, include_flipped_corners=include_flipped_corners)
     fine_views, coarse_views = [], []
 
     for name, tfm in tta_transforms:
@@ -229,7 +235,8 @@ def main():
                         help='Path to WRN checkpoint (.pth or .safetensors)')
     parser.add_argument('--wrn-model', type=str, default='wrn_28_10',
                         choices=['wrn_28_10'])
-    parser.add_argument('--dhvt-checkpoint', type=str, default='../DHVT/output/best.pth',
+    parser.add_argument('--dhvt-checkpoint', type=str,
+                        default='../DHVT/output/cifar/20260419_232837_E/best.pth',
                         help='Path to DHVT checkpoint (.pth or .safetensors)')
     parser.add_argument('--dhvt-model', type=str, default='dhvt_tiny_cifar_patch4',
                         choices=['dhvt_tiny_cifar_patch4', 'dhvt_small_cifar_patch4'])
@@ -240,7 +247,7 @@ def main():
     parser.add_argument('--num-superclasses', type=int, default=20)
     parser.add_argument('--wrn-weight', type=float, default=0.6,
                         help='Weight for WRN in ensemble (DHVT gets 1 - this)')
-    parser.add_argument('--fusion-beta', type=float, default=0.5,
+    parser.add_argument('--fusion-beta', type=float, default=0.1,
                         help='Hierarchical score fusion weight for DHVT aux head. '
                              '0=disabled. Recommended: 0.3 (balanced) ~ 1.0 (SC_Density focus). '
                              'score(c) = log p_fine(c) + beta * log p_coarse(sc(c))')
@@ -252,7 +259,7 @@ def main():
     # --- Load targets ---
     normalize = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
     ])
     test_ds = datasets.CIFAR100(args.data_path, train=False, transform=normalize, download=True)
     target_loader = torch.utils.data.DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)

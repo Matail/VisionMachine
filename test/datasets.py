@@ -3,9 +3,11 @@ import os
 
 from torchvision import datasets, transforms
 
-# ImageNet default normalization values
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+
+CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
+CIFAR100_STD  = (0.2675, 0.2565, 0.2761)
 
 # CIFAR-100 fine label -> coarse (superclass) label mapping
 # 20 superclasses, each containing 5 fine classes
@@ -13,7 +15,7 @@ CIFAR100_FINE_TO_COARSE = [
      4,  1, 14,  8,  0,  6,  7,  7, 18,  3,
      3, 14,  9, 18,  7, 11,  3,  9,  7, 11,
      6, 11,  5, 10,  7,  6, 13, 15,  3, 15,
-     0, 11,  1, 10, 12, 14, 16,  9,  5, 11,
+     0, 11,  1, 10, 12, 14, 16,  9, 11,  5,
      5, 19,  8,  8, 15, 13, 14, 17, 18, 10,
     16,  4, 17,  4,  2,  0, 17,  4, 18, 17,
     10,  3,  2, 12, 12, 16, 12,  1,  9, 19,
