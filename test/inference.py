@@ -4,9 +4,11 @@ Ensemble inference with TTA for WRN + DHVT on CIFAR-100.
 TTA augmentations:
   - original
   - horizontal flip
-  - 4-corner crops (with padding)
+  - 4-corner crops (with model-specific padding)
+  - optional horizontal flips of corner crops
 
-Ensemble strategy: weighted probability averaging across models & TTA variants.
+Ensemble strategy: logit averaging across TTA variants, then weighted
+probability or geometric fusion across models.
 
 Usage:
   python inference.py \
@@ -24,6 +26,7 @@ from models.wideresnet import wrn_28_10
 from models.dhvt import dhvt_tiny_cifar_patch4, dhvt_small_cifar_patch4
 from datasets import (
     IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD,
+    CIFAR100_MEAN, CIFAR100_STD,
     CIFAR100_FINE_TO_COARSE,
 )
 
@@ -32,11 +35,13 @@ from datasets import (
 # TTA transforms
 # ---------------------------------------------------------------------------
 
-def get_tta_transforms(input_size=32, padding=4):
+def get_tta_transforms(input_size=32, padding=4,
+                       mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD,
+                       padding_mode='constant', include_flipped_corners=True):
     """Returns list of (name, transform) for test-time augmentation."""
     normalize = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        transforms.Normalize(mean, std),
     ])
 
     tta_list = [
@@ -57,7 +62,8 @@ def get_tta_transforms(input_size=32, padding=4):
     for name, top, left in crop_specs:
         def make_crop_fn(t, l):
             def crop_fn(img):
-                padded = transforms.functional.pad(img, padding)
+                padded = transforms.functional.pad(
+                    img, padding, padding_mode=padding_mode)
                 return transforms.functional.crop(padded, t, l, input_size, input_size)
             return crop_fn
 
@@ -67,6 +73,24 @@ def get_tta_transforms(input_size=32, padding=4):
         ])))
 
     return tta_list
+
+
+def build_eval_transform(mean, std):
+    """Build a no-TTA evaluation transform."""
+    return transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+
+def make_loader(dataset, batch_size):
+    return torch.utils.data.DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
+
+def autocast_for(device):
+    device_type = torch.device(device).type
+    return torch.amp.autocast(device_type, enabled=device_type == 'cuda')
 
 
 # ---------------------------------------------------------------------------
@@ -87,45 +111,47 @@ def collect_logits(model, dataloader, device):
 
 
 @torch.no_grad()
-def collect_tta_probs(model, data_path, device, input_size=32, batch_size=256):
-    """Collect TTA logit-averaged probabilities for a single model."""
-    tta_transforms = get_tta_transforms(input_size)
+def collect_tta_probs(model, dataset, tta_transforms, device, batch_size=256):
+    """Collect probabilities after averaging logits across TTA views."""
     all_logits = []
 
-    for name, tfm in tta_transforms:
-        ds = datasets.CIFAR100(data_path, train=False, transform=tfm, download=True)
-        loader = torch.utils.data.DataLoader(
-            ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
-        logits = collect_logits(model, loader, device)
-        all_logits.append(logits)
-        print(f"    {name}: done")
+    original_transform = dataset.transform
+    try:
+        for name, tfm in tta_transforms:
+            dataset.transform = tfm
+            logits = collect_logits(model, make_loader(dataset, batch_size), device)
+            all_logits.append(logits)
+            print(f"    {name}: done")
+    finally:
+        dataset.transform = original_transform
 
-    # Logit avg → softmax (better than prob avg)
+    # TTA is logit avg -> softmax, not probability averaging across views.
     return F.softmax(torch.stack(all_logits, dim=0).mean(dim=0), dim=1)
 
 
 @torch.no_grad()
-def collect_tta_logits_with_coarse(model, data_path, device, input_size=32, batch_size=256):
+def collect_tta_logits_with_coarse(model, dataset, tta_transforms, device, batch_size=256):
     """Collect TTA-averaged fine and coarse logits from a DHVT model with aux head."""
-    tta_transforms = get_tta_transforms(input_size)
     fine_views, coarse_views = [], []
 
-    for name, tfm in tta_transforms:
-        ds = datasets.CIFAR100(data_path, train=False, transform=tfm, download=True)
-        loader = torch.utils.data.DataLoader(
-            ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
-        fine_all, coarse_all = [], []
-        for images, _ in loader:
-            images = images.to(device, non_blocking=True)
-            with torch.amp.autocast('cuda'):
-                features = model.forward_features(images)
-                fine_logits = model.head(features)
-                coarse_logits = model.head_superclass(features)
-            fine_all.append(fine_logits.float())
-            coarse_all.append(coarse_logits.float())
-        fine_views.append(torch.cat(fine_all, dim=0))
-        coarse_views.append(torch.cat(coarse_all, dim=0))
-        print(f"    {name}: done")
+    original_transform = dataset.transform
+    try:
+        for name, tfm in tta_transforms:
+            dataset.transform = tfm
+            fine_all, coarse_all = [], []
+            for images, _ in make_loader(dataset, batch_size):
+                images = images.to(device, non_blocking=True)
+                with torch.amp.autocast('cuda'):
+                    features = model.forward_features(images)
+                    fine_logits = model.head(features)
+                    coarse_logits = model.head_superclass(features)
+                fine_all.append(fine_logits.float())
+                coarse_all.append(coarse_logits.float())
+            fine_views.append(torch.cat(fine_all, dim=0))
+            coarse_views.append(torch.cat(coarse_all, dim=0))
+            print(f"    {name}: done")
+    finally:
+        dataset.transform = original_transform
 
     # Logit avg across TTA views (better than prob avg for fusion)
     fine_avg = torch.stack(fine_views, dim=0).mean(dim=0)    # (N, 100)
@@ -241,13 +267,16 @@ def main():
     fine_to_coarse_t = torch.tensor(CIFAR100_FINE_TO_COARSE, dtype=torch.long, device=device)
 
     # --- Load targets ---
-    normalize = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
-    ])
-    test_ds = datasets.CIFAR100(args.data_path, train=False, transform=normalize, download=True)
-    target_loader = torch.utils.data.DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
-    targets = torch.cat([t for _, t in target_loader]).to(device)
+    target_ds = datasets.CIFAR100(args.data_path, train=False, download=True)
+    targets = torch.tensor(target_ds.targets, dtype=torch.long, device=device)
+
+    wrn_transform = build_eval_transform(CIFAR100_MEAN, CIFAR100_STD)
+    dhvt_transform = build_eval_transform(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)
+    wrn_tta = get_tta_transforms(
+        args.input_size, mean=CIFAR100_MEAN, std=CIFAR100_STD, padding_mode='reflect')
+    dhvt_tta = get_tta_transforms(
+        args.input_size, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD,
+        padding_mode='constant')
 
     model_probs = {}
 
@@ -255,19 +284,19 @@ def main():
     if args.wrn_checkpoint:
         print(f"\n=== WRN ({args.wrn_model}) ===")
         wrn = load_model(args.wrn_model, args.wrn_checkpoint, device)
+        wrn_test_ds = datasets.CIFAR100(
+            args.data_path, train=False, transform=wrn_transform, download=True)
 
         # No TTA
-        no_tta_loader = torch.utils.data.DataLoader(
-            test_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-        wrn_logits = collect_logits(wrn, no_tta_loader, device)
+        wrn_logits = collect_logits(wrn, make_loader(wrn_test_ds, args.batch_size), device)
         wrn_probs_no_tta = F.softmax(wrn_logits, dim=1)
         acc1, acc5, sc = compute_metrics(wrn_probs_no_tta, targets, fine_to_coarse_t)
         print_results("WRN - No TTA", acc1, acc5, sc)
 
         # TTA
         print("  Running TTA...")
-        wrn_probs_tta = collect_tta_probs(wrn, args.data_path, device,
-                                          args.input_size, args.batch_size)
+        wrn_probs_tta = collect_tta_probs(
+            wrn, wrn_test_ds, wrn_tta, device, args.batch_size)
         acc1, acc5, sc = compute_metrics(wrn_probs_tta, targets, fine_to_coarse_t)
         print_results("WRN - TTA", acc1, acc5, sc)
         model_probs['wrn'] = wrn_probs_tta
@@ -282,11 +311,11 @@ def main():
             print(f"  Hierarchical score fusion: beta={args.fusion_beta}")
         dhvt = load_model(args.dhvt_model, args.dhvt_checkpoint, device,
                           num_superclasses=args.num_superclasses)
+        dhvt_test_ds = datasets.CIFAR100(
+            args.data_path, train=False, transform=dhvt_transform, download=True)
 
         # No TTA
-        no_tta_loader = torch.utils.data.DataLoader(
-            test_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-        dhvt_logits = collect_logits(dhvt, no_tta_loader, device)
+        dhvt_logits = collect_logits(dhvt, make_loader(dhvt_test_ds, args.batch_size), device)
         dhvt_probs_no_tta = F.softmax(dhvt_logits, dim=1)
         acc1, acc5, sc = compute_metrics(dhvt_probs_no_tta, targets, fine_to_coarse_t)
         print_results("DHVT - No TTA", acc1, acc5, sc)
@@ -295,9 +324,7 @@ def main():
         print("  Running TTA...")
         if use_fusion:
             fine_logits, coarse_logits = collect_tta_logits_with_coarse(
-                dhvt, args.data_path, device, args.input_size, args.batch_size)
-            fine_logits = fine_logits.to(device)
-            coarse_logits = coarse_logits.to(device)
+                dhvt, dhvt_test_ds, dhvt_tta, device, args.batch_size)
             # Without fusion (β=0)
             dhvt_probs_tta = F.softmax(fine_logits, dim=1)
             acc1, acc5, sc = compute_metrics(dhvt_probs_tta, targets, fine_to_coarse_t)
@@ -308,8 +335,8 @@ def main():
             acc1, acc5, sc = compute_metrics(dhvt_probs_tta, targets, fine_to_coarse_t)
             print_results(f"DHVT - TTA + fusion (β={args.fusion_beta})", acc1, acc5, sc)
         else:
-            dhvt_probs_tta = collect_tta_probs(dhvt, args.data_path, device,
-                                               args.input_size, args.batch_size)
+            dhvt_probs_tta = collect_tta_probs(
+                dhvt, dhvt_test_ds, dhvt_tta, device, args.batch_size)
             acc1, acc5, sc = compute_metrics(dhvt_probs_tta, targets, fine_to_coarse_t)
             print_results("DHVT - TTA", acc1, acc5, sc)
 

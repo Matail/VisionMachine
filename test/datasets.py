@@ -7,6 +7,10 @@ from torchvision import datasets, transforms
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
+# CIFAR-100 normalization values used by the WRN training pipeline
+CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
+CIFAR100_STD = (0.2675, 0.2565, 0.2761)
+
 # CIFAR-100 fine label -> coarse (superclass) label mapping
 # 20 superclasses, each containing 5 fine classes
 CIFAR100_FINE_TO_COARSE = [
@@ -23,11 +27,12 @@ CIFAR100_FINE_TO_COARSE = [
 ]
 
 
-def build_cifar100_test_transform(input_size=32):
+def build_cifar100_test_transform(input_size=32, mean=IMAGENET_DEFAULT_MEAN,
+                                  std=IMAGENET_DEFAULT_STD):
     """Build standard test transform for CIFAR-100."""
     return transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        transforms.Normalize(mean, std),
     ])
 
 
