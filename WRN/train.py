@@ -371,7 +371,7 @@ def main():
     best_super_acc = 0.
     start_epoch = 1
 
-    ckpt_path = os.path.join(args.save_dir, 'WRN-28-10_fine0.6.pth')
+    ckpt_path = os.path.join(args.save_dir, 'best_wrn_28_10.pth')
     if args.resume and os.path.exists(ckpt_path):
         ckpt = _load_ckpt(ckpt_path, map_location=device)
         is_safetensors = str(ckpt_path).endswith('.safetensors')
