@@ -18,7 +18,7 @@ $ uv run bash run_code_cifar.sh
 
 ### 2. WRN 학습
 ```bash
-$ cd DHVT
+$ cd WRN
 $ uv run python train.py 
 ```
 ### 3. 테스트

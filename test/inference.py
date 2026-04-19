@@ -236,7 +236,7 @@ def main():
     parser.add_argument('--wrn-model', type=str, default='wrn_28_10',
                         choices=['wrn_28_10'])
     parser.add_argument('--dhvt-checkpoint', type=str,
-                        default='../DHVT/output/cifar/20260419_232837_E/best.pth',
+                        default='../DHVT/output/best.pth',
                         help='Path to DHVT checkpoint (.pth or .safetensors)')
     parser.add_argument('--dhvt-model', type=str, default='dhvt_tiny_cifar_patch4',
                         choices=['dhvt_tiny_cifar_patch4', 'dhvt_small_cifar_patch4'])
