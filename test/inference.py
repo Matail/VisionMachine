@@ -216,7 +216,7 @@ def load_model(model_name, checkpoint_path, device, num_classes=100, num_supercl
 
 def main():
     parser = argparse.ArgumentParser(description="Ensemble + TTA inference for CIFAR-100")
-    parser.add_argument('--wrn-checkpoint', type=str, default=None,
+    parser.add_argument('--wrn-checkpoint', type=str, default='./WRN/checkpoints/best_wrn_28_10.pth',
                         help='Path to WRN checkpoint (.pth)')
     parser.add_argument('--wrn-model', type=str, default='wrn_28_10',
                         choices=['wrn_28_10'])
