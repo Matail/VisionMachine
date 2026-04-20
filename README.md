@@ -2,7 +2,7 @@
 
 
 ## Requirements
-- 본 프로젝트는 uv로 패키지를 관리합니다.
+- 본 프로젝트는 uv로 패키지를 관리합니다. OS :Linux
 ```bash
 # uv 설치
 $ curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -27,5 +27,5 @@ $ uv run python train.py
 ### 3. 테스트
 ```bash
 $ cd test
-$ uv run inference.py
+$ uv run python inference.py
 ```
